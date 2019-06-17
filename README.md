@@ -1,3 +1,3 @@
 # Extract-Cosmology-with-the-BAO-peak-position
 
-Download and follow the instructions on the .ipynb software
+Download and follow the instructions on the analyse_DR12_BAO.ipynb software
