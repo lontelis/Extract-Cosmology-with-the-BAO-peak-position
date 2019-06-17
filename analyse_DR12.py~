@@ -1,0 +1,170 @@
+from numpy import *
+from pylab import *
+from BAO_FITTER import pk_Class,mypymcLib,numMath,fitting
+run_mcmc=False # if False do not run MCMC, if True run also MCMC
+
+## load North Galactic Cap two point correlation function data
+test_xi = load('DATA/xi_n.npz')
+
+loader= test_xi['data'].item()
+r = loader['rcom'] 
+rhAllObs = loader['rhAllObs']
+xi_data = loader['xi_data']
+covmatObs = loader['covmatObs']
+
+### Simplify data input for fitting softwares, only the 0.538 <= z <= 0.592 selected
+xx_data = r                        ## radial comoving scale of the spheres in Mpc/h
+yy_data = xi_data[2]               ## two point correlation function data 
+ye_data = sqrt(diag(covmatObs[2])) ## error in the midle redshift bin 
+
+### cut the data around the peak position
+#wok = where( (xx_data>20.) & (xx_data<180.)  )
+wok = where( (xx_data>20.) & (xx_data<180.)  )
+
+xx = xx_data[wok]
+yy = yy_data[wok]
+ye = ye_data[wok]
+
+## P(k) convertion to xi(r) through pk_Class with the fiducial LCDM cosmology
+paramsFid  =  pk_Class.cosmo_PlanckAll()
+pkTheoryFid =  pk_Class.theory(paramsFid,0.565)
+r_dth       = pkTheoryFid.get_rs()*0.6727
+
+#### fitter inputs:
+
+# construct the model
+def model_iso(x,pars):
+	res_xi = pars[0]**2.*pkTheoryFid.xi(x/pars[1])
+	res_xi[isnan(res_xi)] = -1e30
+	return res_xi
+
+#1# inputs of the fitter using MCMC: mypymcLib.py 
+guess = [2.0,1.0]
+res   = fitting.dothefit(xx,yy,ye,guess,functname=model_iso) 
+
+#2# inputs of the fitter using MCMC: mypymcLib.py 
+if run_mcmc:
+	nburn=0e3
+	niter=20000
+	variables = ['bias','a']
+	data = mypymcLib.Data(xvals=xx,yvals=yy,errors=ye,model=model_iso)
+	chains   = mypymcLib.run_mcmc([data]     , variables=variables,niter=niter,nburn=nburn,w_ll_model='bias_aiso')
+	savez('chain_out.npz',
+		chains=chains,vars=variables, # important lines because they are needed from the mypymcLib.matrixplot module
+		niter=niter,nburn=nburn)
+
+#### Plot the output of the chains 
+def totoPlot(toto,color2='blue',labels=['$b$','$\\alpha$'],Blabel=None,KMIN=5000,NsigLim=5,plotCorrCoef=True):   
+	# load variables
+    vars = toto['vars']                                                                                                                                                                     
+	# load chains
+    chains = toto['chains'].item()                                                                                                                                                          
+	# take only the last KMIN part of the chain that is hopefully converge. 
+	# This is not a convergence test                                                                                                                                                                                                                                                                          
+    nchains = numMath.burnChains(chains,kmin=KMIN)
+
+    smth=10.0 # smoothing factor for making pretty plots
+                                                                                                                                                                                                                                     
+    mypymcLib.matrixplot(nchains, vars, color2, smth, 
+    		labels= labels,
+    		Blabel=Blabel,NsigLim=NsigLim,
+    		Bpercentile=False,
+    		plotCorrCoef=plotCorrCoef)
+
+
+chains_out = load('chain_out.npz')
+figure(1),clf(),totoPlot(chains_out),draw()
+show()
+
+### plot final resuls:
+#1# iminuit results
+figure(2,figsize=(8,5)),clf()
+errorbar(xx,yy*xx**2,ye*xx**2,fmt='b.',label='DR12 CMASS sample')
+# Fit a pretty model
+x_model = linspace(xx.min(),xx.max(),1000)
+plot(x_model,model_iso(x_model,res[1])*x_model**2,'r-',label='MINUIT')
+draw()
+
+#2# MCMC results
+plot_chains = numMath.chainsTo2Darray(chains_out)
+means,stds,covMat,corMat=numMath.average_realisations(plot_chains.T)
+# Caveats:
+# Becarefull! There is a bag here. When you load the chain this way you have to identify the order of the computed means
+# Therefore I put the PermMatlist Option on function numMath.chainsTo2Darray. You need to identify first the order of output of the means and compare it iwth chain_in and see that they are consistent 
+# Here:
+bias_chain_out = means[1]
+aiso_chain_out = means[0]
+plot(x_model,model_iso(x_model,[bias_chain_out,aiso_chain_out])*x_model**2,'g-',label='MCMC')
+draw()
+
+grid()
+legend()
+ylabel('$s^2 \\xi_0(s) $ $[h^{-2}\mathrm{Mpc}^2]$')
+xlabel('$s$ $[h^{-1} \mathrm{Mpc}]$')
+show()
+
+### Computation of the significance of the detection of the BAO peak Position ###
+### delta chi2 = chi2_Gaussian_PowerLaw - chi2_PowerLaw_Error
+### Fit the Gaussian + PowerLaw
+### Fit the PowerLaw + Error
+### Look Pierre Laurent Thesis, page 112, https://www.theses.fr/2016SACLS227.pdf
+### Need to adjust the parameters to get a good measurement of the BAO Peak Position
+### Take the significance level from Table 1 https://ned.ipac.caltech.edu/level5/Wall2/Wal3_4.html
+
+def Gaussian(x,pars):
+	return pars[1]*exp(-0.5*(x-pars[0]*r_dth)**2./pars[2]**2.)
+def PowerLaw(x,pars):
+	return pars[0] + pars[1]/x + pars[2]/x**2.
+def Gaussian_PowerLaw(x,pars):
+	return Gaussian(x, [pars[0],pars[1],pars[2]] ) + PowerLaw(x, [pars[3],pars[4],pars[5]] )
+
+def PowerLaw_Error(x,pars):
+	""" The power law is define as the Gaussian*0.0 + PowerLaw, so that we can fit the parameter 1 and compare the significance. """
+	return 0.0*Gaussian(x, [pars[0],pars[1],pars[2]] ) + PowerLaw(x, [pars[3],pars[4],pars[5]] )
+
+simulated_error_factor = 1.
+guess = [1.0,0.005,10.,0.01,-2.,130.] # best guess, I found them by playing a bit on the Gaussian_PowerLaw, with simulated_error_factor = 1.
+res_Gaussian_PowerLaw = fitting.dothefit(xx,yy,ye/simulated_error_factor,guess,functname=Gaussian_PowerLaw)#,parbounds=[(0.8,1.2),(.0,0.1),(0.0,0.3),(0.0,30.0),(-300.0,300.0),(0.0,100.0)])
+res_PowerLaw_Error    = fitting.dothefit(xx,yy,ye/simulated_error_factor,guess,functname=PowerLaw_Error)#   ,parbounds=[(0.8,1.2),(-300.0,300.0),(-300.0,300.0),(-300.0,300.0),(-300.0,300.0),(-300.0,300.0)])
+
+figure(3)
+clf(),
+errorbar(xx,yy*xx**2,ye/simulated_error_factor*xx**2,fmt='b.',label='DR12 CMASS sample')
+plot(xx, Gaussian_PowerLaw(xx,res_Gaussian_PowerLaw[1])*xx**2.,'r-',label='Gaussian + PowerLaw, $a$=%0.3f$\pm$%0.3f'%(res_Gaussian_PowerLaw[1][0],res_Gaussian_PowerLaw[2][0]) )
+
+plot(xx, PowerLaw_Error(xx,res_PowerLaw_Error[1])*xx**2.,'g-'      ,label='PowerLaw + Error   , $a$=%0.3f$\pm$%0.3f'%(res_PowerLaw_Error[1][0],res_PowerLaw_Error[2][0]) )
+
+title('Factor of Simulated Error = %0.1f  \n $\Delta\chi^2 = \chi^2_{P} - \chi^2_{G+P} = $ %0.1f-%0.1f = %0.1f'%(simulated_error_factor,res_PowerLaw_Error[4],res_Gaussian_PowerLaw[4],res_PowerLaw_Error[4]-res_Gaussian_PowerLaw[4]))
+legend()
+ylabel('$s^2 \\xi_0(s) $ $[h^{-2}\mathrm{Mpc}^2]$')
+xlabel('$s$ $[h^{-1} \mathrm{Mpc}]$')
+draw(),
+show()
+
+###### Exercises for the student:
+
+### Exercise 1: 
+### Fix the parameters of the power law to their best value, 
+### Then redo the fit for the 3 rest parameters. 
+### Compute the significance, give interpretation.
+
+### Exercise 2: 
+### Fix the parameters of the power law and the Amplitude of the Gaussian to their best value, 
+### Then redo the fit for the 2 rest parameters. 
+### Compute the significance, give interpretation.
+
+### Exercise 3: 
+### Fix the parameters of the power law and the dispersion of the Gaussian to their best value, 
+### Then redo the fit for the 2 rest parameters. 
+### Compute the significance, give interpretation.
+
+### Exercise 4: 
+### Fix the parameters of the power law and the Amplitude and dispertion of the Gaussian to their best value, 
+### Then redo the fit for the 1 rest parameter. 
+### Compute the significance, give interpretation.
+
+### Exercise 5: 
+###	Do the same exercises, using the covariance matrix now.
+
+### Exercise 6:
+### Do the same exercises for a a higher simulated error factor. What do you observe on the significance? 
